@@ -1,0 +1,23 @@
+[project]
+name = "source-app-manager"
+version = "0.1.0"
+description = "Install and launch isolated Python source applications"
+requires-python = ">=3.11"
+dependencies = [
+    "dulwich>=1.2.21",
+    "portalocker>=4.0",
+    "uv==0.11.28",
+]
+
+[build-system]
+requires = ["setuptools>=82"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+source_app_manager = ["_pyinstaller/*.py"]
+
+[project.entry-points.pyinstaller40]
+hook-dirs = "source_app_manager:_pyinstaller_hook_dirs"
