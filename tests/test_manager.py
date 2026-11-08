@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +11,7 @@ from dulwich.client import get_transport_and_path
 from dulwich.objects import Commit
 from dulwich.repo import Repo
 from source_app_manager import Application, install, launch_command
+from source_app_manager.manager import _run_process
 
 
 def make_repository(root):
@@ -62,6 +64,22 @@ class LaunchCommandTests(unittest.TestCase):
 
 
 class InstallTests(unittest.TestCase):
+    def test_subprocess_output_is_forwarded_to_progress(self):
+        messages = []
+        _run_process(
+            "dependencies",
+            [
+                sys.executable,
+                "-c",
+                "import sys; print('ready'); print('error', file=sys.stderr)",
+            ],
+            Path.cwd(),
+            os.environ.copy(),
+            messages.append,
+        )
+        self.assertEqual(messages[0], "dependencies")
+        self.assertCountEqual(messages[1:], ["ready", "error"])
+
     def test_existing_unmanaged_directory_is_not_modified(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -84,7 +102,7 @@ class InstallTests(unittest.TestCase):
             uv = root / "uv.exe"
             uv.touch()
             with (
-                patch("source_app_manager.manager.subprocess.run"),
+                patch("source_app_manager.manager._run_process"),
                 self.assertRaises(ValueError),
             ):
                 install(app, root / "managed", uv)
@@ -104,7 +122,7 @@ class InstallTests(unittest.TestCase):
             uv = root / "uv.exe"
             uv.touch()
             app = Application(app.repository, "v2", "3.12")
-            with patch("source_app_manager.manager.subprocess.run"):
+            with patch("source_app_manager.manager._run_process"):
                 source = install(app, root / "managed", uv)
             with Repo(str(source)) as repository:
                 self.assertIsInstance(repository[repository.head()], Commit)
@@ -120,7 +138,7 @@ class InstallTests(unittest.TestCase):
                 patch(
                     "source_app_manager.manager.find_uv_bin", return_value=str(bundled)
                 ),
-                patch("source_app_manager.manager.subprocess.run"),
+                patch("source_app_manager.manager._run_process"),
             ):
                 install(app, target)
             executable = "uv.exe" if os.name == "nt" else "uv"
@@ -150,7 +168,7 @@ class InstallTests(unittest.TestCase):
                     return_value=(client, remote_path),
                 ),
                 patch.object(client, "clone", side_effect=clone),
-                patch("source_app_manager.manager.subprocess.run"),
+                patch("source_app_manager.manager._run_process"),
             ):
                 with self.assertRaisesRegex(RuntimeError, "interrupted"):
                     install(app, target, uv)
@@ -167,7 +185,7 @@ class InstallTests(unittest.TestCase):
             target = root / "managed"
             attempts = []
 
-            def run(command, *, cwd, env, check):
+            def run(stage, command, cwd, environment, progress):
                 attempts.append(command)
                 if (
                     command[1:3] == ["pip", "install"]
@@ -175,7 +193,7 @@ class InstallTests(unittest.TestCase):
                 ):
                     raise RuntimeError("interrupted")
 
-            with patch("source_app_manager.manager.subprocess.run", side_effect=run):
+            with patch("source_app_manager.manager._run_process", side_effect=run):
                 with self.assertRaisesRegex(RuntimeError, "interrupted"):
                     install(app, target, uv)
                 self.assertEqual(install(app, target, uv), target / "app")

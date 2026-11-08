@@ -1,6 +1,7 @@
 """Install source applications in isolated Python environments."""
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -18,6 +19,8 @@ from dulwich.objects import Commit, Tag
 from dulwich.repo import Repo
 from uv import find_uv_bin
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True)
 class Application:
@@ -32,6 +35,42 @@ class Command:
     program: str
     arguments: tuple[str, ...]
     working_directory: str
+
+
+def _run_process(stage, command, cwd, environment, progress):
+    if progress is not None:
+        progress(stage)
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+    )
+    assert process.stdout is not None
+    try:
+        for line in process.stdout:
+            message = line.rstrip("\r\n")
+            if progress is not None:
+                progress(message)
+            else:
+                logger.info("%s: %s", stage, message)
+        returncode = process.wait()
+    except BaseException:
+        try:
+            process.kill()
+        except OSError:
+            logger.warning("Could not stop installation process", exc_info=True)
+        process.wait()
+        raise
+    finally:
+        process.stdout.close()
+    if returncode:
+        raise subprocess.CalledProcessError(returncode, command)
 
 
 def _relative_file(root: Path, name: str) -> Path:
@@ -69,9 +108,7 @@ def install(
         environment.pop(name, None)
 
     def run(stage: str, command: list[str], cwd: Path) -> None:
-        if progress is not None:
-            progress(stage)
-        subprocess.run(command, cwd=cwd, env=environment, check=True)
+        _run_process(stage, command, cwd, environment, progress)
 
     source = directory / "app"
     state_path = directory / "install.json"
