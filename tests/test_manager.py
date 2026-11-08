@@ -4,14 +4,14 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from dulwich import porcelain
 from dulwich.client import get_transport_and_path
 from dulwich.objects import Commit
 from dulwich.repo import Repo
 from source_app_manager import Application, install, launch_command
-from source_app_manager.manager import _run_process
+from source_app_manager.manager import _checkout_path, _run_process
 
 
 def make_repository(root):
@@ -64,6 +64,46 @@ class LaunchCommandTests(unittest.TestCase):
 
 
 class InstallTests(unittest.TestCase):
+    def test_windows_extended_paths_include_unc(self):
+        path = Mock()
+        with patch("source_app_manager.manager.os.name", "nt"):
+            for original, expected in (
+                (r"C:\apps\demo", r"\\?\C:\apps\demo"),
+                (r"\\server\share\demo", r"\\?\UNC\server\share\demo"),
+                (r"\\?\C:\apps\demo", r"\\?\C:\apps\demo"),
+            ):
+                path.resolve.return_value = original
+                self.assertEqual(_checkout_path(path), expected)
+
+    @unittest.skipUnless(os.name == "nt", "Windows long-path behavior")
+    def test_checkout_materializes_long_paths(self):
+        # Keep cleanup on an extended-length path too.
+        with tempfile.TemporaryDirectory(
+            prefix="odh-long-", dir=_checkout_path(Path(tempfile.gettempdir()))
+        ) as folder:
+            root = Path(folder[4:])
+            app = make_repository(root)
+            filename = "w" * 170 + ".txt"
+            (Path(app.repository) / filename).write_text("content", encoding="utf-8")
+            porcelain.add(app.repository, [filename])
+            porcelain.commit(
+                app.repository,
+                message=b"long path",
+                author=b"Test <test@example.org>",
+                committer=b"Test <test@example.org>",
+            )
+            porcelain.tag_create(app.repository, "long")
+            app = Application(app.repository, "long", "3.12")
+            uv = root / "uv.exe"
+            uv.touch()
+            with patch("source_app_manager.manager._run_process"):
+                source = install(app, root / ("x" * 80), uv)
+            self.assertGreater(len(str(source / filename)), 260)
+            self.assertEqual(
+                (Path(_checkout_path(source)) / filename).read_text(encoding="utf-8"),
+                "content",
+            )
+
     def test_subprocess_output_is_forwarded_to_progress(self):
         messages = []
         _run_process(

@@ -17,6 +17,7 @@ from dulwich.client import get_transport_and_path
 from dulwich.object_store import peel_sha
 from dulwich.objects import Commit, Tag
 from dulwich.repo import Repo
+from dulwich.worktree import WorkTree
 from uv import find_uv_bin
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,16 @@ def _run_process(stage, command, cwd, environment, progress):
         process.stdout.close()
     if returncode:
         raise subprocess.CalledProcessError(returncode, command)
+
+
+def _checkout_path(path: Path) -> str:
+    """Allow Git checkout to create long names on Windows, including UNC paths."""
+    value = str(path.resolve())
+    if os.name != "nt" or value.startswith("\\\\?\\"):
+        return value
+    if value.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + value[2:]
+    return "\\\\?\\" + value
 
 
 def _relative_file(root: Path, name: str) -> Path:
@@ -152,6 +163,7 @@ def install(
             with client.clone(
                 remote_path,
                 str(staged_source),
+                checkout=False,
                 depth=1,
                 branch=app.revision,
                 ref_prefix=prefixes,
@@ -171,6 +183,9 @@ def install(
                     if not isinstance(peeled, Commit):
                         raise ValueError("Selected tag does not refer to a commit")
                     repository.refs[b"HEAD"] = peeled.id
+                # Keep Git metadata on a normal path; prefix only the worktree so
+                # Windows can materialize long filenames without breaking refs.
+                WorkTree(repository, _checkout_path(staged_source)).reset_index()
             staged_source.replace(source)
             staging.rmdir()
         else:
