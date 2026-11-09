@@ -1,6 +1,7 @@
 """Install source applications in isolated Python environments."""
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -16,7 +17,10 @@ from dulwich.client import get_transport_and_path
 from dulwich.object_store import peel_sha
 from dulwich.objects import Commit, Tag
 from dulwich.repo import Repo
+from dulwich.worktree import WorkTree
 from uv import find_uv_bin
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -32,6 +36,52 @@ class Command:
     program: str
     arguments: tuple[str, ...]
     working_directory: str
+
+
+def _run_process(stage, command, cwd, environment, progress):
+    if progress is not None:
+        progress(stage)
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+    )
+    assert process.stdout is not None
+    try:
+        for line in process.stdout:
+            message = line.rstrip("\r\n")
+            if progress is not None:
+                progress(message)
+            else:
+                logger.info("%s: %s", stage, message)
+        returncode = process.wait()
+    except BaseException:
+        try:
+            process.kill()
+        except OSError:
+            logger.warning("Could not stop installation process", exc_info=True)
+        process.wait()
+        raise
+    finally:
+        process.stdout.close()
+    if returncode:
+        raise subprocess.CalledProcessError(returncode, command)
+
+
+def _checkout_path(path: Path) -> str:
+    """Allow Git checkout to create long names on Windows, including UNC paths."""
+    value = str(path.resolve())
+    if os.name != "nt" or value.startswith("\\\\?\\"):
+        return value
+    if value.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + value[2:]
+    return "\\\\?\\" + value
 
 
 def _relative_file(root: Path, name: str) -> Path:
@@ -69,9 +119,7 @@ def install(
         environment.pop(name, None)
 
     def run(stage: str, command: list[str], cwd: Path) -> None:
-        if progress is not None:
-            progress(stage)
-        subprocess.run(command, cwd=cwd, env=environment, check=True)
+        _run_process(stage, command, cwd, environment, progress)
 
     source = directory / "app"
     state_path = directory / "install.json"
@@ -115,6 +163,7 @@ def install(
             with client.clone(
                 remote_path,
                 str(staged_source),
+                checkout=False,
                 depth=1,
                 branch=app.revision,
                 ref_prefix=prefixes,
@@ -134,6 +183,9 @@ def install(
                     if not isinstance(peeled, Commit):
                         raise ValueError("Selected tag does not refer to a commit")
                     repository.refs[b"HEAD"] = peeled.id
+                # Keep Git metadata on a normal path; prefix only the worktree so
+                # Windows can materialize long filenames without breaking refs.
+                WorkTree(repository, _checkout_path(staged_source)).reset_index()
             staged_source.replace(source)
             staging.rmdir()
         else:
